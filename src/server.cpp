@@ -179,6 +179,7 @@ class http_message {
 std::map<int, http_message::http_response_status>
 http_message::http_response_statuses = {
   { 200, { std::string{"200"}, std::string("OK") } },
+  { 201, { std::string{"201"}, std::string("Created") } },
   { 302, { std::string{"302"}, std::string("Found") } },
   { 400, { std::string{"400"}, std::string("Bad Request") } },
   { 401, { std::string{"401"}, std::string("Unauthorized") } },
@@ -191,8 +192,9 @@ http_message::http_response_statuses = {
 std::string directory{""};
 
 void handle_client(int client_fd) {
-  unsigned char buffer[1024];
-  ssize_t nbytes = recv(client_fd, buffer, 1024, 0);
+  constexpr auto buffer_size = 8192;
+  unsigned char buffer[buffer_size];
+  ssize_t nbytes = recv(client_fd, buffer, buffer_size, 0);
   if (nbytes < 0) {
     std::cerr << "Failed to recv from client\n";
     close(client_fd);
@@ -206,13 +208,17 @@ void handle_client(int client_fd) {
   std::string reqline{t.get_token(0)};
   // Get headers
   std::vector<std::string> headers;
-  for (int i = 1; i < t.count(); i++) {
+  int i;
+  for (i = 1; i < t.count(); i++) {
     auto& token = t.get_token(i);
     if (token == "\n") {
       break;
     }
     headers.push_back(token);
   }
+  // Get request body
+  // note the offset of 1 to skip the '\n' character
+  std::string body{t.get_token(++i), 1};
   // Get the requested path and method
   t.reset();
   t.tokenize(reqline, ' ');
@@ -226,7 +232,7 @@ void handle_client(int client_fd) {
   // Build HTTP response
   http_message *response = nullptr;
   do {
-    if (method != "GET") {
+    if (method != "GET" && method != "POST") {
       response = new http_message(405);
       break;
     }
@@ -250,35 +256,61 @@ void handle_client(int client_fd) {
       if (directory.length() == 0) {
         break;
       }
+
       t.reset();
       t.tokenize(path, '/');
       std::string filename{path.substr(path.find(t.get_token(2)))};
-
       std::string filepath = directory + std::string{"/"} + filename;
-      struct stat stbuf;
-      if ( (stat(filepath.c_str(), &stbuf) != 0) && (errno == ENOENT) ) {
-        break;
-      }
 
-      char data[stbuf.st_size] = { 0, };
-      int fd = open(filepath.c_str(), O_RDONLY);
-      ssize_t nread = read(fd, data, stbuf.st_size);
-      close(fd);
-      if (nread != stbuf.st_size) {
-        response = new http_message(500);
-        break;
-      }
+      if (method == "GET") {
+        struct stat stbuf;
+        if ( (stat(filepath.c_str(), &stbuf) != 0) && (errno == ENOENT) ) {
+          break;
+        }
 
-      response = new http_message;
-      response->add_header("Content-Type", "application/octet-stream");
-      std::string arg = std::string{"filename=\""} + filename
-        + std::string{"\""};
-      response->add_header("Content-Disposition",  { "attachment", arg });
-      response->add_header("Content-Length", std::to_string(nread));
-      response->add_body(
-        std::string{data, static_cast<std::string::size_type>(nread)}
-      );
-      break;
+        char data[stbuf.st_size] = { 0, };
+        int fd = open(filepath.c_str(), O_RDONLY);
+        if (fd < 0) {
+          response = new http_message(500);
+          break;
+        }
+        ssize_t nread = read(fd, data, stbuf.st_size);
+        close(fd);
+        if (nread != stbuf.st_size) {
+          response = new http_message(500);
+          break;
+        }
+
+        response = new http_message;
+        response->add_header("Content-Type", "application/octet-stream");
+        std::string arg = std::string{"filename=\""} + filename
+          + std::string{"\""};
+        response->add_header("Content-Disposition",  { "attachment", arg });
+        response->add_header("Content-Length", std::to_string(nread));
+        response->add_body(
+          std::string{data, static_cast<std::string::size_type>(nread)}
+        );
+        break;
+
+      } else if (method == "POST") {
+        int fd = open(filepath.c_str(),
+                      O_WRONLY | O_CREAT | O_SYNC,
+                      S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
+        if (fd < 0) {
+          response = new http_message(500);
+          break;
+        }
+        ssize_t nwrite = write(fd, body.c_str(), body.length());
+        close(fd);
+        if (nwrite != body.length()) {
+          response = new http_message(500);
+          break;
+        }
+
+        response = new http_message(201);
+        break;
+
+      }
 
     } else if (path == "/user-agent") {
 #if __cplusplus >= 201703L
