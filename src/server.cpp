@@ -6,11 +6,14 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <thread>
+#include <atomic>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <signal.h>
 
 class tokenizer {
   std::vector<std::string> tokens;
@@ -182,60 +185,13 @@ http_message::http_response_statuses = {
   { 500, { std::string{"500"}, std::string("Internal Server Error") } },
 };
 
-int main(int argc, char **argv) {
-  // You can use print statements as follows for debugging, they'll be visible when running tests.
-  std::cout << "Logs from your program will appear here!\n";
-
-  // Uncomment this block to pass the first stage
-  //
-  int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd < 0) {
-    std::cerr << "Failed to create server socket\n";
-    return 1;
-  }
-  //
-  // Since the tester restarts your program quite often, setting REUSE_PORT
-  // ensures that we don't run into 'Address already in use' errors
-  int reuse = 1;
-  if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) < 0) {
-    std::cerr << "setsockopt failed\n";
-    return 1;
-  }
-  //
-  struct sockaddr_in server_addr;
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(4221);
-  
-  if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
-    std::cerr << "Failed to bind to port 4221\n";
-    return 1;
-  }
-  
-  int connection_backlog = 5;
-  if (listen(server_fd, connection_backlog) != 0) {
-    std::cerr << "listen failed\n";
-    return 1;
-  }
-  
-  struct sockaddr_in client_addr;
-  int client_addr_len = sizeof(client_addr);
-  
-  std::cout << "Waiting for a client to connect...\n";
-  
-  int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
-  if (client_fd < 0) {
-    std::cerr << "Failed to accept client\n";
-    return 1;
-  }
-  std::cout << "Client connected\n";
-  
+void handle_client(int client_fd) {
   unsigned char buffer[1024];
   ssize_t nbytes = recv(client_fd, buffer, 1024, 0);
   if (nbytes < 0) {
     std::cerr << "Failed to recv from client\n";
     close(client_fd);
-    return 1;
+    return;
   }
 
   // Parser HTTP request
@@ -244,18 +200,20 @@ int main(int argc, char **argv) {
   // Get the start-line
   std::string reqline{t.get_token(0)};
   // Get headers
-  std::vector<std::string> headers = t.get_tokens();
-  for (int i = 0; i < t.count(); i++) {
+  std::vector<std::string> headers;
+  for (int i = 1; i < t.count(); i++) {
     auto& token = t.get_token(i);
     if (token == "\n") {
       break;
     }
     headers.push_back(token);
   }
-
+  // Get the requested path and method
   t.reset();
-  // Get the requested path
   t.tokenize(reqline, ' ');
+  // Get request method
+  std::string method{t.get_token(0)};
+  // Get request path
   std::string path{t.get_token(1)};
 
   std::cout << "Requested path: " << path << '\n';
@@ -263,6 +221,10 @@ int main(int argc, char **argv) {
   // Build HTTP response
   http_message *response = nullptr;
   do {
+    if (method != "GET") {
+      response = new http_message(405);
+      break;
+    }
     if (path == "/") {
       response = new http_message();
       break;
@@ -318,7 +280,7 @@ int main(int argc, char **argv) {
   if (!response) {
     std::cerr << "Failed to create HTTP response\n";
     close(client_fd);
-    return 1;
+    return;
   }
   std::string respstr{response->content()};
   delete response;
@@ -327,10 +289,94 @@ int main(int argc, char **argv) {
   nbytes = send(client_fd, respstr.c_str(), respstr.length(), 0);
   if (nbytes < 0) {
     std::cerr << "Failed to send to client\n";
-    close(client_fd);
+  }
+
+  close(client_fd);
+}
+
+static
+std::atomic<bool> exit_condition = false;
+
+static
+struct sigaction old_sa;
+
+void sigint_handler(int sig) {
+  sigaction(SIGINT, &old_sa, NULL);
+
+  exit_condition = true;
+
+  sigaction(SIGINT, &old_sa, NULL);
+}
+
+int main(int argc, char **argv) {
+  // Setup SIGINT handler
+  struct sigaction sa;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  sa.sa_handler = sigint_handler;
+  sigaction(SIGINT, &sa, &old_sa);
+
+
+  // You can use print statements as follows for debugging, they'll be visible when running tests.
+  std::cout << "Logs from your program will appear here!\n";
+
+  // Uncomment this block to pass the first stage
+  //
+  int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (server_fd < 0) {
+    std::cerr << "Failed to create server socket\n";
+    return 1;
+  }
+  //
+  // Since the tester restarts your program quite often, setting REUSE_PORT
+  // ensures that we don't run into 'Address already in use' errors
+  int reuse = 1;
+  if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) < 0) {
+    std::cerr << "setsockopt failed\n";
+    return 1;
+  }
+  //
+  struct sockaddr_in server_addr;
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = INADDR_ANY;
+  server_addr.sin_port = htons(4221);
+  
+  if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
+    std::cerr << "Failed to bind to port 4221\n";
     return 1;
   }
   
+  int connection_backlog = 5;
+  if (listen(server_fd, connection_backlog) != 0) {
+    std::cerr << "listen failed\n";
+    return 1;
+  }
+  
+  struct sockaddr_in client_addr;
+  int client_addr_len = sizeof(client_addr);
+  
+  std::cout << "Waiting for a client to connect...\n";
+  
+  // Handle connections
+  constexpr auto max_concurrent_conn = 5;
+  std::thread tclient[max_concurrent_conn];
+  int num_conn = 0;
+
+  while ( !exit_condition && (num_conn < max_concurrent_conn) ) {
+    int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
+    if (client_fd < 0) {
+      std::cerr << "Failed to accept client\n";
+      continue;
+    }
+    std::cout << "Client connected\n";
+
+    tclient[num_conn++] = std::thread(handle_client, client_fd);
+  }
+
+  for (int i = 0; i < num_conn; i++) {
+    tclient[i].join();
+  }
+
 cleanup:
   close(server_fd);
 
