@@ -255,7 +255,7 @@ int main(int argc, char **argv) {
   } else if (path.find("echo") == 1) {
     t.reset();
     t.tokenize(path, '/');
-    std::string arg{t.get_token(2)};
+    std::string arg{path.substr(path.find(t.get_token(2)))};
 
     response = new http_message();
     response->add_header("Content-Type", "text/plain");
