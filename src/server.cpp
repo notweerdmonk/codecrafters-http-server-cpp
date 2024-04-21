@@ -276,11 +276,21 @@ int main(int argc, char **argv) {
       response->add_body(arg);
       break;
     } else if (path == "/user-agent") {
+#if __cplusplus >= 201703L
       auto it = std::find_if(headers.begin(),
                              headers.end(),
                              [](std::string& h) {
                                return h.find("User-Agent") != std::string::npos;
                              });
+#else
+      auto it = headers.begin();
+      while (it != headers.end()) {
+        if (it->find("User-Agent") != std::string::npos) {
+          break;
+        }
+        ++it;
+      }
+#endif
       if (it == headers.end()) {
         break;
       }
@@ -298,12 +308,12 @@ int main(int argc, char **argv) {
       response->add_body(useragent);
       break;
     }
-
-    // Default response
-    if (!response) {
-      response = new http_message(404);
-    }
   } while (0);
+
+  // Default response
+  if (!response) {
+    response = new http_message(404);
+  }
   if (!response) {
     std::cerr << "Failed to create HTTP response\n";
     close(client_fd);
