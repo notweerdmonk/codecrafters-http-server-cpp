@@ -2,11 +2,184 @@
 #include <cstdlib>
 #include <string>
 #include <cstring>
+#include <sstream>
+#include <vector>
+#include <map>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+
+class tokenizer {
+  std::vector<std::string> tokens;
+  static std::string empty;
+
+  public:
+
+  void tokenize_internal(std::stringstream& buffer, char delimiter) {
+    std::string token;
+
+    while (std::getline(buffer, token, delimiter)) {
+      tokens.push_back(token);
+    }
+  }
+
+  void tokenize(std::string&& str, char delimiter) {
+    std::stringstream buffer(str);
+
+    tokenize_internal(buffer, delimiter);
+  }
+
+  void tokenize(std::string& str, char delimiter) {
+    std::stringstream buffer(str);
+
+    tokenize_internal(buffer, delimiter);
+  }
+
+  tokenizer() = default;
+
+  tokenizer(std::string&& str, char delimiter) {
+    tokenize(str, delimiter);
+  }
+
+  tokenizer(std::string& str, char delimiter) {
+    tokenize(str, delimiter);
+  }
+
+  size_t count() {
+    return tokens.size();
+  }
+
+  std::vector<std::string>& get_tokens() {
+    return tokens;
+  }
+
+  std::string& get_token(std::string::size_type i) {
+    return i < tokens.size() ? tokens[i] : empty;
+  };
+
+  void reset() {
+    tokens.clear();
+  }
+};
+
+std::string tokenizer::empty{""};
+
+class http_message {
+  std::string version{"1.1"};
+  std::string header;
+  std::string body;
+  std::string message;
+
+  struct http_response_status {
+    std::string code;
+    std::string status;
+  };
+
+  static std::map<int, http_response_status> http_response_statuses;
+  
+  void set_statusline() {
+    header += std::string{"HTTP/"} + version + std::string{" "}
+    + http_response_statuses[200].code + std::string{" "}
+    + http_response_statuses[200].status + std::string{"\r\n"};
+  }
+
+  void set_statusline(int status) {
+    header += std::string{"HTTP/"} + version + std::string{" "}
+    + http_response_statuses[status].code + std::string{" "}
+    + http_response_statuses[status].status + std::string{"\r\n"};
+  }
+
+  public:
+
+  http_message() : header{""}, body{""} {
+    set_statusline();
+    message = header + std::string{"\r\n"} + body;
+  }
+
+  http_message(int status) {
+    set_statusline(status);
+    message = header + std::string{"\r\n"} + body;
+  }
+
+  http_message(std::string& _version, int status = 200)
+    : version{_version}, header{""}, body{""} {
+    set_statusline(status);
+    message = header + std::string{"\r\n"} + body;
+  }
+
+  http_message(std::string& _version, std::string& _body, int status = 200)
+    : version{_version}, header{""}, body{_body} {
+    set_statusline(status);
+    message = header + std::string{"\r\n"} + body;
+  }
+
+  void add_header(std::string& key, std::string& value) {
+    if (key.length() > 0) {
+      header += key + std::string{": "} + value + std::string{"\n"};
+
+      message = header + std::string{"\r\n"} + body;
+    }
+  }
+
+  void add_header(std::string&& key, std::string&& value) {
+    if (key.length() > 0) {
+      header += key + std::string{": "} + value + std::string{"\n"};
+
+      message = header + std::string{"\r\n"} + body;
+    }
+  }
+
+  void add_header(std::string& key, std::initializer_list<std::string> values) {
+    if (key.length() > 0) {
+      header += key + std::string{": "};
+      for (auto v : values) {
+        header += v + std::string{","};
+      }
+      header += std::string{"\n"};
+
+      message = header + std::string{"\r\n"} + body;
+    }
+  }
+
+  void add_header(std::string&& key,
+                  std::initializer_list<std::string> values) {
+    if (key.length() > 0) {
+      header += key + std::string{": "};
+      for (auto v : values) {
+        header += v + std::string{";"};
+      }
+      header += std::string{"\n"};
+
+      message = header + std::string{"\r\n"} + body;
+    }
+  }
+
+  void add_body(std::string& body) {
+    message = header + std::string{"\r\n"} + body;
+  }
+
+  void add_body(std::string&& body) {
+    message = header + std::string{"\r\n"} + body;
+  }
+
+  std::string& content() {
+    return message;
+  }
+};
+
+std::map<int, http_message::http_response_status>
+http_message::http_response_statuses = {
+  { 200, { std::string{"200"}, std::string("OK") } },
+  { 302, { std::string{"302"}, std::string("Found") } },
+  { 400, { std::string{"400"}, std::string("Bad Request") } },
+  { 401, { std::string{"401"}, std::string("Unauthorized") } },
+  { 403, { std::string{"403"}, std::string("Forbidden") } },
+  { 404, { std::string{"404"}, std::string("Not Found") } },
+  { 405, { std::string{"405"}, std::string("Method Not Allowed") } },
+  { 500, { std::string{"500"}, std::string("Internal Server Error") } },
+};
 
 int main(int argc, char **argv) {
   // You can use print statements as follows for debugging, they'll be visible when running tests.
@@ -57,7 +230,6 @@ int main(int argc, char **argv) {
   std::cout << "Client connected\n";
   
   unsigned char buffer[1024];
-
   ssize_t nbytes = recv(client_fd, buffer, 1024, 0);
   if (nbytes < 0) {
     std::cerr << "Failed to recv from client\n";
@@ -65,11 +237,34 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  // Do nothing with received data
+  // Parser HTTP request
+  tokenizer t{std::string{reinterpret_cast<const char*>(buffer), 1024}, '\n'};
+  // Get the start-line
+  std::string reqline{t.get_token(0)};
+  t.reset();
+  // Get the requested path
+  t.tokenize(reqline, ' ');
+  std::string path{t.get_token(1)};
+
+  std::cout << "Requested path: " << path << '\n';
+
+  // Build HTTP response
+  http_message *response;
+  if (path == "/") {
+    response = new http_message();
+  } else {
+    response = new http_message(404);
+  }
+  if (!response) {
+    std::cerr << "Failed to create HTTP response\n";
+    close(client_fd);
+    return 1;
+  }
+  std::string respstr{response->content()};
+  delete response;
 
   // Send HTTP response
-  std::string response { "HTTP/1.1 200 OK\r\n\r\n" };
-  nbytes = send(client_fd, response.c_str(), response.length(), 0);
+  nbytes = send(client_fd, respstr.c_str(), respstr.length(), 0);
   if (nbytes < 0) {
     std::cerr << "Failed to send to client\n";
     close(client_fd);
