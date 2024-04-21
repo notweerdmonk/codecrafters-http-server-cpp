@@ -14,6 +14,9 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <signal.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 class tokenizer {
   std::vector<std::string> tokens;
@@ -185,6 +188,8 @@ http_message::http_response_statuses = {
   { 500, { std::string{"500"}, std::string("Internal Server Error") } },
 };
 
+std::string directory{""};
+
 void handle_client(int client_fd) {
   unsigned char buffer[1024];
   ssize_t nbytes = recv(client_fd, buffer, 1024, 0);
@@ -225,19 +230,56 @@ void handle_client(int client_fd) {
       response = new http_message(405);
       break;
     }
+
     if (path == "/") {
-      response = new http_message();
+      response = new http_message;
       break;
+
     } else if (path.find("echo") == 1) {
       t.reset();
       t.tokenize(path, '/');
       std::string arg{path.substr(path.find(t.get_token(2)))};
 
-      response = new http_message();
+      response = new http_message;
       response->add_header("Content-Type", "text/plain");
       response->add_header("Content-Length", std::to_string(arg.length()));
       response->add_body(arg);
       break;
+
+    } else if (path.find("files") == 1) {
+      if (directory.length() == 0) {
+        break;
+      }
+      t.reset();
+      t.tokenize(path, '/');
+      std::string filename{path.substr(path.find(t.get_token(2)))};
+
+      std::string filepath = directory + std::string{"/"} + filename;
+      struct stat stbuf;
+      if ( (stat(filepath.c_str(), &stbuf) != 0) && (errno == ENOENT) ) {
+        break;
+      }
+
+      char data[stbuf.st_size] = { 0, };
+      int fd = open(filepath.c_str(), O_RDONLY);
+      ssize_t nread = read(fd, data, stbuf.st_size);
+      close(fd);
+      if (nread != stbuf.st_size) {
+        response = new http_message(500);
+        break;
+      }
+
+      response = new http_message;
+      response->add_header("Content-Type", "application/octet-stream");
+      std::string arg = std::string{"filename=\""} + filename
+        + std::string{"\""};
+      response->add_header("Content-Disposition",  { "attachment", arg });
+      response->add_header("Content-Length", std::to_string(nread));
+      response->add_body(
+        std::string{data, static_cast<std::string::size_type>(nread)}
+      );
+      break;
+
     } else if (path == "/user-agent") {
 #if __cplusplus >= 201703L
       auto it = std::find_if(headers.begin(),
@@ -265,7 +307,7 @@ void handle_client(int client_fd) {
       std::string useragent = t.get_token(1);
       std::cout << "User agent: " << useragent << '\n';
 
-      response = new http_message();
+      response = new http_message;
       response->add_header("Content-Type", "text/plain");
       response->add_header("Content-Length", std::to_string(useragent.length()));
       response->add_body(useragent);
@@ -316,6 +358,12 @@ int main(int argc, char **argv) {
   sa.sa_handler = sigint_handler;
   sigaction(SIGINT, &sa, &old_sa);
 
+  // Host files from directory
+  if (argc == 3) {
+    if (!strncmp(argv[1], "--directory", strlen("--directory"))) {
+      directory = std::string{argv[2]};
+    }
+  }
 
   // You can use print statements as follows for debugging, they'll be visible when running tests.
   std::cout << "Logs from your program will appear here!\n";
