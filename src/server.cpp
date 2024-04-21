@@ -252,6 +252,15 @@ int main(int argc, char **argv) {
   http_message *response;
   if (path == "/") {
     response = new http_message();
+  } else if (path.find("echo") == 1) {
+    t.reset();
+    t.tokenize(path, '/');
+    std::string arg{t.get_token(2)};
+
+    response = new http_message();
+    response->add_header("Content-Type", "text/plain");
+    response->add_header("Content-Length", std::to_string(arg.length()));
+    response->add_body(arg);
   } else {
     response = new http_message(404);
   }
