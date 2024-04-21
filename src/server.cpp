@@ -5,6 +5,7 @@
 #include <sstream>
 #include <vector>
 #include <map>
+#include <algorithm>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
