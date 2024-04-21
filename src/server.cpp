@@ -238,9 +238,20 @@ int main(int argc, char **argv) {
   }
 
   // Parser HTTP request
-  tokenizer t{std::string{reinterpret_cast<const char*>(buffer), 1024}, '\n'};
+  tokenizer t{std::string{reinterpret_cast<const char*>(buffer),
+                          static_cast<std::string::size_type>(nbytes)}, '\r'};
   // Get the start-line
   std::string reqline{t.get_token(0)};
+  // Get headers
+  std::vector<std::string> headers = t.get_tokens();
+  for (int i = 0; i < t.count(); i++) {
+    auto& token = t.get_token(i);
+    if (token == "\n") {
+      break;
+    }
+    headers.push_back(token);
+  }
+
   t.reset();
   // Get the requested path
   t.tokenize(reqline, ' ');
@@ -249,21 +260,50 @@ int main(int argc, char **argv) {
   std::cout << "Requested path: " << path << '\n';
 
   // Build HTTP response
-  http_message *response;
-  if (path == "/") {
-    response = new http_message();
-  } else if (path.find("echo") == 1) {
-    t.reset();
-    t.tokenize(path, '/');
-    std::string arg{path.substr(path.find(t.get_token(2)))};
+  http_message *response = nullptr;
+  do {
+    if (path == "/") {
+      response = new http_message();
+      break;
+    } else if (path.find("echo") == 1) {
+      t.reset();
+      t.tokenize(path, '/');
+      std::string arg{path.substr(path.find(t.get_token(2)))};
 
-    response = new http_message();
-    response->add_header("Content-Type", "text/plain");
-    response->add_header("Content-Length", std::to_string(arg.length()));
-    response->add_body(arg);
-  } else {
-    response = new http_message(404);
-  }
+      response = new http_message();
+      response->add_header("Content-Type", "text/plain");
+      response->add_header("Content-Length", std::to_string(arg.length()));
+      response->add_body(arg);
+      break;
+    } else if (path == "/user-agent") {
+      auto it = std::find_if(headers.begin(),
+                             headers.end(),
+                             [](std::string& h) {
+                               return h.find("User-Agent") != std::string::npos;
+                             });
+      if (it == headers.end()) {
+        break;
+      }
+      t.reset();
+      t.tokenize(*it, ' ');
+      if (t.count() != 2) {
+        break;
+      }
+      std::string useragent = t.get_token(1);
+      std::cout << "User agent: " << useragent << '\n';
+
+      response = new http_message();
+      response->add_header("Content-Type", "text/plain");
+      response->add_header("Content-Length", std::to_string(useragent.length()));
+      response->add_body(useragent);
+      break;
+    }
+
+    // Default response
+    if (!response) {
+      response = new http_message(404);
+    }
+  } while (0);
   if (!response) {
     std::cerr << "Failed to create HTTP response\n";
     close(client_fd);
