@@ -117,7 +117,7 @@ class http_message {
 
   void add_header(std::string& key, std::string& value) {
     if (key.length() > 0) {
-      header += key + std::string{": "} + value + std::string{"\n"};
+      header += key + std::string{": "} + value + std::string{"\r\n"};
 
       message = header + std::string{"\r\n"} + body;
     }
@@ -125,7 +125,7 @@ class http_message {
 
   void add_header(std::string&& key, std::string&& value) {
     if (key.length() > 0) {
-      header += key + std::string{": "} + value + std::string{"\n"};
+      header += key + std::string{": "} + value + std::string{"\r\n"};
 
       message = header + std::string{"\r\n"} + body;
     }
@@ -137,7 +137,7 @@ class http_message {
       for (auto v : values) {
         header += v + std::string{","};
       }
-      header += std::string{"\n"};
+      header += std::string{"\r\n"};
 
       message = header + std::string{"\r\n"} + body;
     }
@@ -150,7 +150,7 @@ class http_message {
       for (auto v : values) {
         header += v + std::string{";"};
       }
-      header += std::string{"\n"};
+      header += std::string{"\r\n"};
 
       message = header + std::string{"\r\n"} + body;
     }
