@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
               break;
 
             case 1:
-              url = "http://localhost:4221/echo/pwned/in/dream";
+              url = "http://localhost:4221/echo/mangoes/in/summer";
               break;
 
             case 2:
@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
 
           curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
           curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
-          curl_easy_setopt(curl, CURLOPT_USERAGENT, "laggybrowser1337");
+          curl_easy_setopt(curl, CURLOPT_USERAGENT, "laggybrowser/0.01");
           curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
           curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
 

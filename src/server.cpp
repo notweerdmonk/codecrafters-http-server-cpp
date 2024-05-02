@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -18,6 +20,162 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <getopt.h>
+
+template<typename T, T guard, size_t max_size = 8>
+class queue {
+  T data[max_size];
+  ssize_t front, rear;
+
+  public:
+
+  queue() : front(-1), rear(-1) {
+  }
+
+  bool empty() {
+    return front == -1;
+  }
+
+  bool full() {
+    return rear == max_size - 1;
+  }
+
+  size_t size() {
+    return empty() ? 0 : rear - front + 1;
+  }
+
+  void enqueue(T t) {
+    if (full()) {
+      return;
+    }
+
+    data[++rear] = t;
+
+    if (empty()) {
+      front = 0;
+    }
+  }
+
+  T peek() {
+    if (empty()) {
+      return guard;
+    }
+
+    return data[front];
+  }
+
+  T dequeue() {
+    if (empty()) {
+      return guard;
+    }
+
+    T t = data[front++];
+
+    if (front > rear) {
+      front = rear = -1;
+    }
+
+    return t;
+  }
+
+    // Iterator class for queue
+
+#if __cplusplus >= 202002L
+
+    class iterator {
+        T* ptr;
+
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = T;
+        using difference_type = ssize_t;
+        using pointer = T*;
+        using reference = T&;
+
+        iterator(T* p) : ptr(p) {}
+
+        iterator& operator++() {
+            ++ptr;
+            return *this;
+        }
+
+        iterator operator++(int) {
+            iterator tmp = *this;
+            ++(*this);
+            return tmp;
+        }
+
+        bool operator==(const iterator& other) const {
+            return ptr == other.ptr;
+        }
+
+        bool operator!=(const iterator& other) const {
+            return !(*this == other);
+        }
+
+        reference operator*() const {
+            return *ptr;
+        }
+
+        pointer operator->() const {
+            return ptr;
+        }
+    };
+
+    iterator begin() {
+        return iterator(&data[front + 1]);
+    }
+
+    iterator end() {
+        return iterator(&data[rear + 1]);
+    }
+
+#else
+
+  class iterator : public std::iterator<std::forward_iterator_tag, T> {
+    T* ptr;
+
+    public:
+    iterator(T* p) : ptr(p) {}
+
+    iterator& operator++() {
+      ++ptr;
+      return *this;
+    }
+
+    iterator operator++(int) {
+      iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+
+    bool operator==(const iterator& other) const {
+      return ptr == other.ptr;
+    }
+
+    bool operator!=(const iterator& other) const {
+      return !(*this == other);
+    }
+
+    T& operator*() const {
+      return *ptr;
+    }
+
+    T* operator->() const {
+      return ptr;
+    }
+  };
+
+  iterator begin() {
+    return iterator(&data[front + 1]);
+  }
+
+  iterator end() {
+    return iterator(&data[rear + 1]);
+  }
+
+#endif
+
+};
 
 class tokenizer {
   std::vector<std::string> tokens;
@@ -511,14 +669,15 @@ void sigint_handler(int sig) {
   sigaction(SIGINT, &old_sa, NULL);
 }
 
-int main(int argc, char **argv) {
-  // Setup SIGINT handler
+void setup_sigint_handler() {
   struct sigaction sa;
   sigemptyset(&sa.sa_mask);
   sa.sa_flags = 0;
   sa.sa_handler = sigint_handler;
   sigaction(SIGINT, &sa, &old_sa);
+}
 
+std::string get_directory(int argc, char **argv) {
   int opt;
   std::string directory;
 
@@ -532,13 +691,43 @@ int main(int argc, char **argv) {
         directory = std::string(optarg);
         break;
       case '?':
-        return EXIT_FAILURE;
+        return "";
     }
   }
 
-  http_server server("", 4221, directory);
+  return directory;
+}
+
+int main(int argc, char **argv) {
+
+  setup_sigint_handler();
+
+  http_server server("", 4221, get_directory(argc, argv));
 
   std::cout << "Waiting for a client to connect...\n";
+
+  constexpr auto max_concurrent_conn = 10;
+  std::thread thread_pool[max_concurrent_conn];
+  queue<http_client*, nullptr, 16> q;
+  std::mutex mtx;
+  std::condition_variable cv;
+
+  auto thread_worker = [&]() {
+    while (!exit_condition) {
+      std::unique_lock<std::mutex> lock(mtx);
+
+      cv.wait(lock, [&]() { return !q.empty(); });
+      http_client *c = q.dequeue();
+
+      lock.unlock();
+
+      (*c)();
+    }
+  };
+
+  for (auto i = 0; i < max_concurrent_conn; i++) {
+    thread_pool[i] = std::thread(thread_worker);
+  }
 
   while (!exit_condition) {
     http_client *c = server.accept();
@@ -548,11 +737,10 @@ int main(int argc, char **argv) {
 
     std::cout << "Client " << *c << " connected\n";
 
-    std::thread t  = std::thread([c]() {
-      (*c)();
-      delete c;
-    });
-    t.detach();
+    std::lock_guard<std::mutex> lock(mtx);
+
+    q.enqueue(c);
+    cv.notify_one();
   }
 
   std::cout << "Exiting\n";
