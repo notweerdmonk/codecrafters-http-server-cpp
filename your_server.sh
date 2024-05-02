@@ -6,6 +6,7 @@
 #
 # DON'T EDIT THIS!
 set -e
-cmake . >/dev/null
+mkdir -p build && cd build
+cmake -DCMAKE_BUILD_TYPE=Debug .. >/dev/null
 make >/dev/null
 exec ./server "$@"
