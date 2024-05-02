@@ -716,6 +716,9 @@ int main(int argc, char **argv) {
     while (!exit_condition) {
       std::unique_lock<std::mutex> lock(mtx);
 
+      // check condition, if not met wait on the condition variable
+      // this atomically releases the mutex and puts the thread to sleep
+      // when notified reacquire the mutex and recheck the condition
       cv.wait(lock, [&]() { return !q.empty(); });
       http_client *c = q.dequeue();
 
