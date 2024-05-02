@@ -507,7 +507,6 @@ class http_client {
           break;
         }
         std::string useragent = t.get_token(1);
-        std::cout << "User agent: " << useragent << '\n';
 
         response = new http_message;
         response->add_header("Content-Type", "text/plain");
@@ -733,19 +732,25 @@ int main(int argc, char **argv) {
   }
 
   while (!exit_condition) {
-    http_client *c = server.accept();
-    if (!c) {
-      continue;
+    if (q.size() < max_concurrent_conn) {
+      http_client *c = server.accept();
+      if (!c) {
+        continue;
+      }
+  
+      std::cout << "Client " << *c << " connected\n";
+  
+      std::lock_guard<std::mutex> lock(mtx);
+  
+      q.enqueue(c);
+      cv.notify_one();
     }
-
-    std::cout << "Client " << *c << " connected\n";
-
-    std::lock_guard<std::mutex> lock(mtx);
-
-    q.enqueue(c);
-    cv.notify_one();
   }
 
+  for (auto& t : thread_pool) {
+    t.join();
+  }
   std::cout << "Exiting\n";
+
   return EXIT_SUCCESS;
 }
