@@ -17,12 +17,11 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <getopt.h>
 
 class tokenizer {
   std::vector<std::string> tokens;
   static std::string empty;
-
-  public:
 
   void tokenize_internal(std::stringstream& buffer, char delimiter) {
     std::string token;
@@ -31,6 +30,8 @@ class tokenizer {
       tokens.push_back(token);
     }
   }
+
+ public:
 
   void tokenize(std::string&& str, char delimiter) {
     std::stringstream buffer(str);
@@ -85,39 +86,23 @@ class http_message {
   };
 
   static std::map<int, http_response_status> http_response_statuses;
-  
-  void set_statusline() {
+
+  void set_statusline(int status = 200) {
     header += std::string{"HTTP/"} + version + std::string{" "}
-    + http_response_statuses[200].code + std::string{" "}
-    + http_response_statuses[200].status + std::string{"\r\n"};
+              + http_response_statuses[status].code + std::string{" "}
+              + http_response_statuses[status].status + std::string{"\r\n"};
   }
 
-  void set_statusline(int status) {
-    header += std::string{"HTTP/"} + version + std::string{" "}
-    + http_response_statuses[status].code + std::string{" "}
-    + http_response_statuses[status].status + std::string{"\r\n"};
-  }
+ public:
 
-  public:
-
-  http_message() : header{""}, body{""} {
-    set_statusline();
-    message = header + std::string{"\r\n"} + body;
-  }
-
-  http_message(int status) {
+  http_message(int status = 200, const std::string& _version = "1.1")
+    : version{const_cast<std::string&>(_version)}, header{""}, body{""} {
     set_statusline(status);
     message = header + std::string{"\r\n"} + body;
   }
 
-  http_message(std::string& _version, int status = 200)
-    : version{_version}, header{""}, body{""} {
-    set_statusline(status);
-    message = header + std::string{"\r\n"} + body;
-  }
-
-  http_message(std::string& _version, std::string& _body, int status = 200)
-    : version{_version}, header{""}, body{_body} {
+  http_message(std::string& body_, int status = 200, const std::string& _version = "1.1")
+    : version{_version}, header{""}, body{body_} {
     set_statusline(status);
     message = header + std::string{"\r\n"} + body;
   }
@@ -151,7 +136,7 @@ class http_message {
   }
 
   void add_header(std::string&& key,
-                  std::initializer_list<std::string> values) {
+            std::initializer_list<std::string> values) {
     if (key.length() > 0) {
       header += key + std::string{": "};
       for (auto v : values) {
@@ -163,11 +148,13 @@ class http_message {
     }
   }
 
-  void add_body(std::string& body) {
+  void add_body(std::string& _body) {
+    body = _body;
     message = header + std::string{"\r\n"} + body;
   }
 
-  void add_body(std::string&& body) {
+  void add_body(std::string&& _body) {
+    body = _body;
     message = header + std::string{"\r\n"} + body;
   }
 
@@ -189,184 +176,328 @@ http_message::http_response_statuses = {
   { 500, { std::string{"500"}, std::string("Internal Server Error") } },
 };
 
-std::string directory{""};
+class http_client {
+  int client_fd{-1};
+  std::string host{};
+  unsigned int port{};
+  std::string directory{};
 
-void handle_client(int client_fd) {
-  constexpr auto buffer_size = 8192;
-  unsigned char buffer[buffer_size];
-  ssize_t nbytes = recv(client_fd, buffer, buffer_size, 0);
-  if (nbytes < 0) {
-    std::cerr << "Failed to recv from client\n";
+ public:
+  http_client(int client_fd_, std::string& host_, unsigned int port_,
+            const std::string& directory_ = "") : client_fd(client_fd_),
+            host(host_), port(port_), directory(directory_) {
+  }
+
+  ~http_client() {
+    /* Redundant but safe */
     close(client_fd);
-    return;
   }
 
-  // Parser HTTP request
-  tokenizer t{std::string{reinterpret_cast<const char*>(buffer),
-                          static_cast<std::string::size_type>(nbytes)}, '\r'};
-  // Get the start-line
-  std::string reqline{t.get_token(0)};
-  // Get headers
-  std::vector<std::string> headers;
-  int i;
-  for (i = 1; i < t.count(); i++) {
-    auto& token = t.get_token(i);
-    if (token == "\n") {
-      break;
-    }
-    headers.push_back(token);
+  friend std::ostream& operator<<(std::ostream& o, const http_client& c) {
+    o << c.host << ":" << c.port;
+    return o;
   }
-  // Get request body
-  // note the offset of 1 to skip the '\n' character
-  std::string body{t.get_token(++i), 1};
-  // Get the requested path and method
-  t.reset();
-  t.tokenize(reqline, ' ');
-  // Get request method
-  std::string method{t.get_token(0)};
-  // Get request path
-  std::string path{t.get_token(1)};
 
-  std::cout << "Requested path: " << path << '\n';
-
-  // Build HTTP response
-  http_message *response = nullptr;
-  do {
-    if (method != "GET" && method != "POST") {
-      response = new http_message(405);
-      break;
+  void operator()() {
+    constexpr auto buffer_size = 8192;
+    unsigned char buffer[buffer_size];
+    ssize_t nbytes = recv(client_fd, buffer, buffer_size, 0);
+    if (nbytes < 0) {
+      std::cerr << "Failed to recv from client\n";
+      close(client_fd);
+      return;
     }
 
-    if (path == "/") {
-      response = new http_message;
-      break;
+    // Parser HTTP request
+    tokenizer t{std::string{reinterpret_cast<const char*>(buffer),
+              static_cast<std::string::size_type>(nbytes)}, '\r'};
+    // Get the start-line
+    std::string reqline{t.get_token(0)};
+    // Get headers
+    std::vector<std::string> headers{};
+    int i;
+    for (i = 1; i < t.count(); i++) {
+      auto& token = t.get_token(i);
+      if (token == "\n") {
+        break;
+      }
+      headers.push_back(token);
+    }
+    // Get request body
+    std::string body{};
+    if (i < t.count() - 1) {
+      // note the offset of 1 to skip the '\n' character
+      body = std::string{t.get_token(++i), 1};
+    }
+    // Get the requested path and method
+    t.reset();
+    t.tokenize(reqline, ' ');
+    // Get request method
+    std::string method{t.get_token(0)};
+    // Get request path
+    std::string path{t.get_token(1)};
 
-    } else if (path.find("echo") == 1) {
-      t.reset();
-      t.tokenize(path, '/');
-      std::string arg{path.substr(path.find(t.get_token(2)))};
+    std::cout << "Requested path: " << path << '\n';
 
-      response = new http_message;
-      response->add_header("Content-Type", "text/plain");
-      response->add_header("Content-Length", std::to_string(arg.length()));
-      response->add_body(arg);
-      break;
-
-    } else if (path.find("files") == 1) {
-      if (directory.length() == 0) {
+    // Build HTTP response
+    http_message *response = nullptr;
+    do {
+      if (method != "GET" && method != "POST") {
+        response = new http_message(405);
         break;
       }
 
-      t.reset();
-      t.tokenize(path, '/');
-      std::string filename{path.substr(path.find(t.get_token(2)))};
-      std::string filepath = directory + std::string{"/"} + filename;
+      if (path == "/") {
+        response = new http_message;
+        break;
 
-      if (method == "GET") {
-        struct stat stbuf;
-        if ( (stat(filepath.c_str(), &stbuf) != 0) && (errno == ENOENT) ) {
-          break;
-        }
-
-        char data[stbuf.st_size] = { 0, };
-        int fd = open(filepath.c_str(), O_RDONLY);
-        if (fd < 0) {
-          response = new http_message(500);
-          break;
-        }
-        ssize_t nread = read(fd, data, stbuf.st_size);
-        close(fd);
-        if (nread != stbuf.st_size) {
-          response = new http_message(500);
-          break;
-        }
+      } else if (path.find("echo") == 1) {
+        t.reset();
+        t.tokenize(path, '/');
+        std::string arg{path.substr(path.find(t.get_token(2)))};
 
         response = new http_message;
-        response->add_header("Content-Type", "application/octet-stream");
-        std::string arg = std::string{"filename=\""} + filename
-          + std::string{"\""};
-        response->add_header("Content-Disposition",  { "attachment", arg });
-        response->add_header("Content-Length", std::to_string(nread));
-        response->add_body(
-          std::string{data, static_cast<std::string::size_type>(nread)}
-        );
+        response->add_header("Content-Type", "text/plain");
+        response->add_header("Content-Length", std::to_string(arg.length()));
+        response->add_body(arg);
         break;
 
-      } else if (method == "POST") {
-        int fd = open(filepath.c_str(),
-                      O_WRONLY | O_CREAT | O_SYNC,
-                      S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
-        if (fd < 0) {
-          response = new http_message(500);
-          break;
-        }
-        ssize_t nwrite = write(fd, body.c_str(), body.length());
-        close(fd);
-        if (nwrite != body.length()) {
-          response = new http_message(500);
+      } else if (path.find("files") == 1) {
+        if (directory.length() == 0) {
           break;
         }
 
-        response = new http_message(201);
-        break;
+        t.reset();
+        t.tokenize(path, '/');
+        std::string filename{path.substr(path.find(t.get_token(2)))};
+        std::string filepath = directory + std::string{"/"} + filename;
 
-      }
+        // Host files from directory
+        if (method == "GET") {
+          struct stat stbuf;
+          if ( (stat(filepath.c_str(), &stbuf) != 0) && (errno == ENOENT) ) {
+            break;
+          }
 
-    } else if (path == "/user-agent") {
+          char data[stbuf.st_size] = { 0, };
+          int fd = open(filepath.c_str(), O_RDONLY);
+          if (fd < 0) {
+            response = new http_message(500);
+            break;
+          }
+
+          ssize_t nread = read(fd, data, stbuf.st_size);
+          close(fd);
+          if (nread != stbuf.st_size) {
+            response = new http_message(500);
+            break;
+          }
+
+          response = new http_message;
+          response->add_header("Content-Type", "application/octet-stream");
+          std::string arg = std::string{"filename=\""} + filename
+                            + std::string{"\""};
+          response->add_header("Content-Disposition",  { "attachment", arg });
+          response->add_header("Content-Length", std::to_string(nread));
+          response->add_body(
+            std::string{data, static_cast<std::string::size_type>(nread)}
+          );
+          break;
+
+        } else if (method == "POST") {
+          int fd = open(filepath.c_str(),
+                    O_WRONLY | O_CREAT | O_SYNC,
+                    S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
+          if (fd < 0) {
+            response = new http_message(500);
+            break;
+          }
+          ssize_t nwrite = write(fd, body.c_str(), body.length());
+          close(fd);
+          if (nwrite != body.length()) {
+            response = new http_message(500);
+            break;
+          }
+
+          response = new http_message(201);
+          break;
+
+        }
+
+      } else if (path == "/user-agent") {
 #if __cplusplus >= 201703L
-      auto it = std::find_if(headers.begin(),
-                             headers.end(),
-                             [](std::string& h) {
-                               return h.find("User-Agent") != std::string::npos;
-                             });
+        auto it = std::find_if(headers.begin(),
+                               headers.end(),
+        [](std::string& h) {
+          return h.find("User-Agent") != std::string::npos;
+        });
 #else
-      auto it = headers.begin();
-      while (it != headers.end()) {
-        if (it->find("User-Agent") != std::string::npos) {
+        auto it = headers.begin();
+        while (it != headers.end()) {
+          if (it->find("User-Agent") != std::string::npos) {
+            break;
+          }
+          ++it;
+        }
+#endif
+        if (it == headers.end()) {
           break;
         }
-        ++it;
-      }
-#endif
-      if (it == headers.end()) {
-        break;
-      }
-      t.reset();
-      t.tokenize(*it, ' ');
-      if (t.count() != 2) {
-        break;
-      }
-      std::string useragent = t.get_token(1);
-      std::cout << "User agent: " << useragent << '\n';
+        t.reset();
+        t.tokenize(*it, ' ');
+        if (t.count() != 2) {
+          break;
+        }
+        std::string useragent = t.get_token(1);
+        std::cout << "User agent: " << useragent << '\n';
 
-      response = new http_message;
-      response->add_header("Content-Type", "text/plain");
-      response->add_header("Content-Length", std::to_string(useragent.length()));
-      response->add_body(useragent);
-      break;
+        response = new http_message;
+        response->add_header("Content-Type", "text/plain");
+        response->add_header("Content-Length",
+                  std::to_string(useragent.length()));
+        response->add_body(useragent);
+        break;
+      }
+    } while (0);
+
+    // Default response
+    if (!response) {
+      response = new http_message(404);
     }
-  } while (0);
+    if (!response) {
+      std::cerr << "Failed to create HTTP response\n";
+      close(client_fd);
+      return;
+    }
+    std::string respstr{response->content()};
+    delete response;
 
-  // Default response
-  if (!response) {
-    response = new http_message(404);
-  }
-  if (!response) {
-    std::cerr << "Failed to create HTTP response\n";
+    // Send HTTP response
+    nbytes = send(client_fd, respstr.c_str(), respstr.length(), 0);
+    if (nbytes < 0) {
+      std::cerr << "Failed to send to client\n";
+    }
+
     close(client_fd);
-    return;
   }
-  std::string respstr{response->content()};
-  delete response;
+};
 
-  // Send HTTP response
-  nbytes = send(client_fd, respstr.c_str(), respstr.length(), 0);
-  if (nbytes < 0) {
-    std::cerr << "Failed to send to client\n";
+class http_server {
+  int server_fd;
+  std::string directory;
+
+ public:
+
+  http_server(const std::string& host, unsigned int port,
+              const std::string& directory_ = "", unsigned int backlog = 5)
+              : directory(directory_) {
+    struct addrinfo hints;
+    struct addrinfo *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    const char* port_str = std::to_string(port).c_str();
+    const char *node_str = host == "" ? NULL : host.c_str();
+
+    int status;
+    /* Get address(es) to bind the socket to */
+    if ((status = getaddrinfo(node_str, port_str, &hints, &res)) != 0) {
+      std::string error_message = "socket() failed: ";
+      error_message += gai_strerror(status);
+      error_message += '\n';
+      throw std::runtime_error(error_message);
+    }
+
+    status = -1;
+    /* Try each address until we successfully bind the socket */
+    for (struct addrinfo *rp = res; rp != NULL; rp = rp->ai_next) {
+      sockaddr_in *inet_addr = (struct sockaddr_in*)res->ai_addr;
+      std::cout << "Trying address " << inet_ntoa(inet_addr->sin_addr) << ":" <<
+                ntohs(inet_addr->sin_port) << "\n";
+
+      /* Create a socket */
+      server_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+      if (server_fd == -1) {
+        std::string error_message = "socket() failed: ";
+        error_message += strerror(errno);
+        error_message += '\n';
+        std::cerr << error_message;
+        continue;
+      }
+
+      // Since the tester restarts your program quite often, setting REUSE_PORT
+      // ensures that we don't run into 'Address already in use' errors
+      int reuse = 1;
+      if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &reuse,
+                     sizeof(reuse)) < 0) {
+        close(server_fd);
+        std::string error_message = "setsockopt() failed: ";
+        error_message += strerror(errno);
+        error_message += '\n';
+        std::cerr << error_message;
+        continue;
+      }
+
+      /* Bind the socket to current address */
+      if (bind(server_fd, res->ai_addr, res->ai_addrlen) == -1) {
+        close(server_fd);
+        std::string error_message = "bind() failed: ";
+        error_message += strerror(errno);
+        error_message += '\n';
+        std::cerr << error_message;
+      } else {
+        /* Success! */
+        sockaddr_in *inet_addr = (struct sockaddr_in*)res->ai_addr;
+        std::cout << "Bound to address " << inet_ntoa(inet_addr->sin_addr) <<
+                  ":" << ntohs(inet_addr->sin_port) << "\n";
+
+        status = 0;
+        break;
+      }
+    }
+
+    freeaddrinfo(res);
+
+    if (status != -1) {
+      /* Set the socket as listening */
+      if (listen(server_fd, (backlog == 0 ? SOMAXCONN : backlog)) == -1) {
+        close(server_fd);
+        std::string error_message = "listen() failed: ";
+        error_message += strerror(errno);
+        error_message += '\n';
+        throw std::runtime_error(error_message);
+      }
+    } else {
+      throw std::runtime_error("Could not create server");
+    }
   }
 
-  close(client_fd);
-}
+  ~http_server() {
+    close(server_fd);
+  }
+
+  http_client* accept() {
+    struct sockaddr_in client_addr;
+    int client_addr_len = sizeof(client_addr);
+
+    int client_fd = ::accept(server_fd, (struct sockaddr *) &client_addr,
+                             (socklen_t *) &client_addr_len);
+    if (client_fd < 0) {
+      std::cerr << "accept() failed: " << strerror(errno) << '\n';
+      return nullptr;
+    }
+
+    char ipaddr_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(client_addr.sin_addr), ipaddr_str, INET_ADDRSTRLEN);
+    std::string ipaddr = ipaddr_str;
+    unsigned int port = ntohs(client_addr.sin_port);
+
+    return new http_client(client_fd, ipaddr, port, directory);
+  }
+
+};
 
 static
 std::atomic<bool> exit_condition = false;
@@ -376,9 +507,7 @@ struct sigaction old_sa;
 
 void sigint_handler(int sig) {
   sigaction(SIGINT, &old_sa, NULL);
-
   exit_condition = true;
-
   sigaction(SIGINT, &old_sa, NULL);
 }
 
@@ -390,75 +519,42 @@ int main(int argc, char **argv) {
   sa.sa_handler = sigint_handler;
   sigaction(SIGINT, &sa, &old_sa);
 
-  // Host files from directory
-  if (argc == 3) {
-    if (!strncmp(argv[1], "--directory", strlen("--directory"))) {
-      directory = std::string{argv[2]};
+  int opt;
+  std::string directory;
+
+  struct option long_options[] = {
+    {"directory", required_argument, 0, 'd'},
+    {0, 0, 0, 0}
+  };
+  while ((opt = getopt_long(argc, argv, "d:", long_options, NULL)) != -1) {
+    switch (opt) {
+      case 'd':
+        directory = std::string(optarg);
+        break;
+      case '?':
+        return EXIT_FAILURE;
     }
   }
 
-  // You can use print statements as follows for debugging, they'll be visible when running tests.
-  std::cout << "Logs from your program will appear here!\n";
+  http_server server("", 4221, directory);
 
-  // Uncomment this block to pass the first stage
-  //
-  int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd < 0) {
-    std::cerr << "Failed to create server socket\n";
-    return 1;
-  }
-  //
-  // Since the tester restarts your program quite often, setting REUSE_PORT
-  // ensures that we don't run into 'Address already in use' errors
-  int reuse = 1;
-  if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) < 0) {
-    std::cerr << "setsockopt failed\n";
-    return 1;
-  }
-  //
-  struct sockaddr_in server_addr;
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(4221);
-  
-  if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
-    std::cerr << "Failed to bind to port 4221\n";
-    return 1;
-  }
-  
-  int connection_backlog = 5;
-  if (listen(server_fd, connection_backlog) != 0) {
-    std::cerr << "listen failed\n";
-    return 1;
-  }
-  
-  struct sockaddr_in client_addr;
-  int client_addr_len = sizeof(client_addr);
-  
   std::cout << "Waiting for a client to connect...\n";
-  
-  // Handle connections
-  constexpr auto max_concurrent_conn = 5;
-  std::thread tclient[max_concurrent_conn];
-  int num_conn = 0;
 
-  while ( !exit_condition && (num_conn < max_concurrent_conn) ) {
-    int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
-    if (client_fd < 0) {
-      std::cerr << "Failed to accept client\n";
+  while (!exit_condition) {
+    http_client *c = server.accept();
+    if (!c) {
       continue;
     }
-    std::cout << "Client connected\n";
 
-    tclient[num_conn++] = std::thread(handle_client, client_fd);
+    std::cout << "Client " << *c << " connected\n";
+
+    std::thread t  = std::thread([c]() {
+      (*c)();
+      delete c;
+    });
+    t.detach();
   }
 
-  for (int i = 0; i < num_conn; i++) {
-    tclient[i].join();
-  }
-
-cleanup:
-  close(server_fd);
-
-  return 0;
+  std::cout << "Exiting\n";
+  return EXIT_SUCCESS;
 }
