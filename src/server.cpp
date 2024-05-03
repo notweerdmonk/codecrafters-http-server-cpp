@@ -26,7 +26,7 @@ class queue {
   T data[max_size];
   ssize_t front, rear;
 
-  public:
+ public:
 
   queue() : front(-1), rear(-1) {
   }
@@ -77,64 +77,64 @@ class queue {
     return t;
   }
 
-    // Iterator class for queue
+  // Iterator class for queue
 
 #if __cplusplus >= 202002L
 
-    class iterator {
-        T* ptr;
+  class iterator {
+    T* ptr;
 
-    public:
-        using iterator_category = std::forward_iterator_tag;
-        using value_type = T;
-        using difference_type = ssize_t;
-        using pointer = T*;
-        using reference = T&;
+   public:
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = T;
+    using difference_type = ssize_t;
+    using pointer = T*;
+    using reference = T&;
 
-        iterator(T* p) : ptr(p) {}
+    iterator(T* p) : ptr(p) {}
 
-        iterator& operator++() {
-            ++ptr;
-            return *this;
-        }
-
-        iterator operator++(int) {
-            iterator tmp = *this;
-            ++(*this);
-            return tmp;
-        }
-
-        bool operator==(const iterator& other) const {
-            return ptr == other.ptr;
-        }
-
-        bool operator!=(const iterator& other) const {
-            return !(*this == other);
-        }
-
-        reference operator*() const {
-            return *ptr;
-        }
-
-        pointer operator->() const {
-            return ptr;
-        }
-    };
-
-    iterator begin() {
-        return iterator(&data[front + 1]);
+    iterator& operator++() {
+      ++ptr;
+      return *this;
     }
 
-    iterator end() {
-        return iterator(&data[rear + 1]);
+    iterator operator++(int) {
+      iterator tmp = *this;
+      ++(*this);
+      return tmp;
     }
+
+    bool operator==(const iterator& other) const {
+      return ptr == other.ptr;
+    }
+
+    bool operator!=(const iterator& other) const {
+      return !(*this == other);
+    }
+
+    reference operator*() const {
+      return *ptr;
+    }
+
+    pointer operator->() const {
+      return ptr;
+    }
+  };
+
+  iterator begin() {
+    return iterator(&data[front + 1]);
+  }
+
+  iterator end() {
+    return iterator(&data[rear + 1]);
+  }
 
 #else
 
   class iterator : public std::iterator<std::forward_iterator_tag, T> {
     T* ptr;
 
-    public:
+   public:
     iterator(T* p) : ptr(p) {}
 
     iterator& operator++() {
@@ -259,8 +259,9 @@ class http_message {
     message = header + std::string{"\r\n"} + body;
   }
 
-  http_message(std::string& body_, int status = 200, const std::string& _version = "1.1")
-    : version{_version}, header{""}, body{body_} {
+  http_message(std::string& body_, int status = 200,
+               const std::string& _version = "1.1")
+               : version{_version}, header{""}, body{body_} {
     set_statusline(status);
     message = header + std::string{"\r\n"} + body;
   }
@@ -294,7 +295,7 @@ class http_message {
   }
 
   void add_header(std::string&& key,
-            std::initializer_list<std::string> values) {
+                  std::initializer_list<std::string> values) {
     if (key.length() > 0) {
       header += key + std::string{": "};
       for (auto v : values) {
@@ -342,8 +343,8 @@ class http_client {
 
  public:
   http_client(int client_fd_, std::string& host_, unsigned int port_,
-            const std::string& directory_ = "") : client_fd(client_fd_),
-            host(host_), port(port_), directory(directory_) {
+              const std::string& directory_ = "") : client_fd(client_fd_),
+    host(host_), port(port_), directory(directory_) {
   }
 
   ~http_client() {
@@ -368,7 +369,7 @@ class http_client {
 
     // Parser HTTP request
     tokenizer t{std::string{reinterpret_cast<const char*>(buffer),
-              static_cast<std::string::size_type>(nbytes)}, '\r'};
+                            static_cast<std::string::size_type>(nbytes)}, '\r'};
     // Get the start-line
     std::string reqline{t.get_token(0)};
     // Get headers
@@ -464,8 +465,8 @@ class http_client {
 
         } else if (method == "POST") {
           int fd = open(filepath.c_str(),
-                    O_WRONLY | O_CREAT | O_SYNC,
-                    S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
+                        O_WRONLY | O_CREAT | O_SYNC,
+                        S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
           if (fd < 0) {
             response = new http_message(500);
             break;
@@ -511,7 +512,7 @@ class http_client {
         response = new http_message;
         response->add_header("Content-Type", "text/plain");
         response->add_header("Content-Length",
-                  std::to_string(useragent.length()));
+                             std::to_string(useragent.length()));
         response->add_body(useragent);
         break;
       }
@@ -665,7 +666,6 @@ struct sigaction old_sa;
 void sigint_handler(int sig) {
   sigaction(SIGINT, &old_sa, NULL);
   exit_condition = true;
-  sigaction(SIGINT, &old_sa, NULL);
 }
 
 void setup_sigint_handler() {
@@ -718,7 +718,9 @@ int main(int argc, char **argv) {
       // check condition, if not met wait on the condition variable
       // this atomically releases the mutex and puts the thread to sleep
       // when notified reacquire the mutex and recheck the condition
-      cv.wait(lock, [&]() { return !q.empty(); });
+      cv.wait(lock, [&]() {
+        return !q.empty();
+      });
       http_client *c = q.dequeue();
 
       lock.unlock();
@@ -737,11 +739,9 @@ int main(int argc, char **argv) {
       if (!c) {
         continue;
       }
-  
+
       std::cout << "Client " << *c << " connected\n";
-  
-      std::lock_guard<std::mutex> lock(mtx);
-  
+
       q.enqueue(c);
       cv.notify_one();
     }
