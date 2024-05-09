@@ -8,6 +8,14 @@
 #include <fcntl.h>
 #include <curl/curl.h>
 
+#define ANSI_COLOR_RED     "\x1b[31m"
+#define ANSI_COLOR_GREEN   "\x1b[32m"
+#define ANSI_COLOR_YELLOW  "\x1b[33m"
+#define ANSI_COLOR_BLUE    "\x1b[34m"
+#define ANSI_COLOR_MAGENTA "\x1b[35m"
+#define ANSI_COLOR_CYAN    "\x1b[36m"
+#define ANSI_COLOR_RESET   "\x1b[0m"
+
 #define NUM_THREADS 8
 #define NUM_REQUESTS 64
 
@@ -131,16 +139,19 @@ int main(int argc, char** argv) {
           std::cerr << "curl_easy_perform() failed: " <<
                     curl_easy_strerror(res) << std::endl;
         } else {
+          long http_response_code;
+          curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_response_code);
+
           std::lock_guard<std::mutex> lock(mtx);
           std::cout << "Request # " << nreqlocal << " URL: " << url;
           if (nreqlocal % 5 == 4) {
             if (diff_res) {
-              std::cout << " Files don't match";
+              std::cout << ANSI_COLOR_RED " Files don't match" ANSI_COLOR_RESET;
             } else {
-              std::cout << " Files match";
+              std::cout << ANSI_COLOR_GREEN " Files match" ANSI_COLOR_RESET;
             }
           }
-          std::cout << " Response: " << response << std::endl;
+          std::cout << " Response code: " << http_response_code << " Response: " << response << std::endl;
         }
 
         curl_easy_cleanup(curl);
