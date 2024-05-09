@@ -21,26 +21,48 @@
 #include <errno.h>
 #include <getopt.h>
 
+static
+std::atomic<bool> exit_condition{false};
+
+static
+struct sigaction old_sa;
+
+void sigint_handler(int sig) {
+  sigaction(SIGINT, &old_sa, NULL);
+  exit_condition = true;
+}
+
+void setup_sigint_handler() {
+  struct sigaction sa;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  sa.sa_handler = sigint_handler;
+  sigaction(SIGINT, &sa, &old_sa);
+}
+
 template<typename T, T guard, size_t max_size = 8>
 class queue {
   T data[max_size];
-  ssize_t front, rear;
+  ssize_t out, in, qsize;
 
  public:
 
-  queue() : front(-1), rear(-1) {
+  queue() : out(0), in(0), qsize(0) {
   }
 
-  bool empty() {
-    return front == -1;
-  }
-
-  bool full() {
-    return rear == max_size - 1;
-  }
-
+  inline
   size_t size() {
-    return empty() ? 0 : rear - front + 1;
+    return qsize;
+  }
+
+  inline
+  bool empty() {
+    return qsize == 0;
+  }
+
+  inline
+  bool full() {
+    return qsize == max_size;
   }
 
   void enqueue(T t) {
@@ -48,11 +70,12 @@ class queue {
       return;
     }
 
-    data[++rear] = t;
-
-    if (empty()) {
-      front = 0;
+    data[in] = t;
+    if (++in == max_size) {
+      in = 0;
     }
+
+    qsize++;
   }
 
   T peek() {
@@ -60,7 +83,7 @@ class queue {
       return guard;
     }
 
-    return data[front];
+    return data[out];
   }
 
   T dequeue() {
@@ -68,33 +91,44 @@ class queue {
       return guard;
     }
 
-    T t = data[front++];
-
-    if (front > rear) {
-      front = rear = -1;
+    T t = data[out];
+    if (++out == max_size) {
+      out = 0;
     }
+
+    qsize--;
 
     return t;
   }
 
   // Iterator class for queue
+  friend class iterator;
 
 #if __cplusplus >= 202002L
 
   class iterator {
+    queue& q;
     T* ptr;
+    size_t remaining;
 
    public:
     using iterator_category = std::forward_iterator_tag;
     using value_type = T;
-    using difference_type = ssize_t;
+    using element_type = T;
+    using difference_type = std::ptrdiff_t;
     using pointer = T*;
     using reference = T&;
 
-    iterator(T* p) : ptr(p) {}
+    iterator(queue& q, T* p) : q(q), ptr(p), remaining(q.size()) {}
 
     iterator& operator++() {
       ++ptr;
+      --remaining;
+      if (remaining == 0) {
+        ptr = &q.data[max_size];
+      } else if (ptr == &q.data[max_size]) {
+        ptr = q.data;
+      }
       return *this;
     }
 
@@ -122,23 +156,31 @@ class queue {
   };
 
   iterator begin() {
-    return iterator(&data[front + 1]);
+    return iterator(*this, &data[out]);
   }
 
   iterator end() {
-    return iterator(&data[rear + 1]);
+    return iterator(*this, &data[max_size]);
   }
 
 #else
 
   class iterator : public std::iterator<std::forward_iterator_tag, T> {
+    queue& q;
     T* ptr;
+    size_t remaining;
 
    public:
-    iterator(T* p) : ptr(p) {}
+    iterator(queue& q, T* p) : q(q), ptr(p), remaining(q.size()) {}
 
     iterator& operator++() {
       ++ptr;
+      --remaining;
+      if (remaining == 0) {
+        ptr = &q.data[max_size];
+      } else if (ptr == &q.data[max_size]) {
+        ptr = q.data;
+      }
       return *this;
     }
 
@@ -166,14 +208,81 @@ class queue {
   };
 
   iterator begin() {
-    return iterator(&data[front + 1]);
+    return iterator(*this, &data[out]);
   }
 
   iterator end() {
-    return iterator(&data[rear + 1]);
+    return iterator(*this, &data[max_size]);
   }
 
 #endif
+
+};
+
+template<typename task_type, size_t max_concurrent_conn = 10>
+class thread_pool {
+  using pointer = task_type*;
+  queue<pointer, nullptr, max_concurrent_conn> q;
+  std::thread pool[max_concurrent_conn];
+  std::mutex mtx;
+  std::condition_variable cv;
+  std::atomic<bool> exit_condition;
+
+ public:
+  thread_pool() : exit_condition(false) {
+    for (auto i = 0; i < max_concurrent_conn; i++) {
+      pool[i] = std::thread([this]() {
+        while (!this->exit_condition) {
+          std::unique_lock<std::mutex> lock(this->mtx);
+
+          // check condition, if not met wait on the condition variable
+          // this atomically releases the mutex and puts the thread to sleep
+          // when notified reacquire the mutex and recheck the condition
+          this->cv.wait(lock, [&]() {
+            return !this->q.empty() || this->exit_condition;
+          });
+          if (this->exit_condition) {
+            return;
+          }
+
+          pointer ptask = this->q.dequeue();
+          lock.unlock();
+          if (!ptask) {
+            continue;
+          }
+          (*ptask)();
+          delete ptask;
+        }
+      });
+    }
+  }
+
+  size_t size() {
+    std::lock_guard<std::mutex> lock(mtx);
+    return q.size();
+  }
+
+  void enqueue(pointer ptask) {
+    std::lock_guard<std::mutex> lock(mtx);
+    q.enqueue(ptask);
+    cv.notify_one();
+  }
+
+  void exit() {
+    if (exit_condition) {
+      return;
+    }
+
+    exit_condition = true;
+    cv.notify_all();
+    for (auto& t : pool) {
+      t.join();
+    }
+  }
+
+  ~thread_pool() {
+    exit();
+  }
 
 };
 
@@ -657,28 +766,9 @@ class http_server {
 
 };
 
-static
-std::atomic<bool> exit_condition = false;
-
-static
-struct sigaction old_sa;
-
-void sigint_handler(int sig) {
-  sigaction(SIGINT, &old_sa, NULL);
-  exit_condition = true;
-}
-
-void setup_sigint_handler() {
-  struct sigaction sa;
-  sigemptyset(&sa.sa_mask);
-  sa.sa_flags = 0;
-  sa.sa_handler = sigint_handler;
-  sigaction(SIGINT, &sa, &old_sa);
-}
-
 std::string get_directory(int argc, char **argv) {
   int opt;
-  std::string directory;
+  std::string directory{};
 
   struct option long_options[] = {
     {"directory", required_argument, 0, 'd'},
@@ -705,51 +795,23 @@ int main(int argc, char **argv) {
 
   std::cout << "Waiting for a client to connect...\n";
 
-  constexpr auto max_concurrent_conn = 10;
-  std::thread thread_pool[max_concurrent_conn];
-  queue<http_client*, nullptr, 16> q;
-  std::mutex mtx;
-  std::condition_variable cv;
-
-  auto thread_worker = [&]() {
-    while (!exit_condition) {
-      std::unique_lock<std::mutex> lock(mtx);
-
-      // check condition, if not met wait on the condition variable
-      // this atomically releases the mutex and puts the thread to sleep
-      // when notified reacquire the mutex and recheck the condition
-      cv.wait(lock, [&]() {
-        return !q.empty();
-      });
-      http_client *c = q.dequeue();
-
-      lock.unlock();
-
-      (*c)();
-    }
-  };
-
-  for (auto i = 0; i < max_concurrent_conn; i++) {
-    thread_pool[i] = std::thread(thread_worker);
-  }
+  thread_pool<http_client, 10> tpool;
 
   while (!exit_condition) {
-    if (q.size() < max_concurrent_conn) {
-      http_client *c = server.accept();
+    if (tpool.size() < 10) {
+      http_client *c = server.accept();;
       if (!c) {
         continue;
       }
 
       std::cout << "Client " << *c << " connected\n";
 
-      q.enqueue(c);
-      cv.notify_one();
+      tpool.enqueue(c);
     }
   }
 
-  for (auto& t : thread_pool) {
-    t.join();
-  }
+  tpool.exit();
+  
   std::cout << "Exiting\n";
 
   return EXIT_SUCCESS;
