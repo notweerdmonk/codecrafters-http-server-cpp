@@ -10,6 +10,8 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <regex>
+#include <utility>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -525,6 +527,98 @@ class http_client {
         std::string arg{path.substr(path.find(t.get_token(2)))};
 
         response = new http_message;
+
+#if __cplusplus >= 201703L
+        auto it = std::find_if(
+            headers.begin(),
+            headers.end(),
+            [](std::string& h) {
+              return h.find("Accept-Encoding") != std::string::npos;
+            }
+          );
+#else
+        auto it = headers.begin();
+        while (it != headers.end()) {
+          if (it->find("Accept-Encoding") != std::string::npos) {
+            break;
+          }
+          ++it;
+        }
+#endif
+
+        do {
+          if (it != headers.end()) {
+          	t.reset();
+          	t.tokenize(*it, ':');
+          	if (t.count() != 2) {
+          	  break;
+          	}
+          	std::string &enc_tok = t.get_token(1);
+
+				  	std::vector<std::pair<std::string, std::string>> encodings;
+
+            /* werkzeug v2.2.2, file: werkzeug/http.py */
+			    	std::regex accept_re(
+			    	    R"(()"
+			    	      R"([^\s;,]+)"
+			    	      R"((?:[ \t]*;[ \t]*)"
+			    	        R"((?:)"
+			    	          R"([^\s;,q][^\s;,]*)"
+			    	        R"(|)"
+			    	          R"(q[^\s;,=][^\s;,]*)"
+			    	        R"())"
+			    	      R"()*)"
+			    	    R"())"
+			    	    R"((?:[ \t]*;[ \t]*q=)"
+			    	      R"((\d*(?:\.\d+)?))"
+			    	      R"([^,]*)"
+			    	    R"()?)"
+			    	  );
+				  	std::smatch match;
+				  	std::string::const_iterator start(enc_tok.cbegin());
+				  	while (std::regex_search(start, enc_tok.cend(), match, accept_re)) {
+				  		std::string encoding = match[1].matched ? match[1].str()
+				  				: match[4].str();
+				  		std::string qvalue = match[2].matched ? match[2].str() : "1.0";
+
+				  		encodings.push_back({encoding, qvalue});
+
+				  	  start = match.suffix().first;
+				  	}
+				  	if (encodings.empty()) {
+				  		break;
+          	}
+
+				  	/* Choose gzip if available */
+#if __cplusplus >= 201703L && 1
+            auto enc_it = std::find_if(
+              encodings.begin(),
+              encodings.end(),
+              [](std::pair<std::string, std::string> &p) {
+                return p.first.find("gzip") != std::string::npos;
+              }
+            );
+#else
+            auto enc_it = encodings.begin();
+            while (enc_it != encodings.end()) {
+              if (enc_it->first.find("gzip") != std::string::npos) {
+                break;
+              }
+              ++enc_it;
+            }
+#endif
+            if (enc_it == encodings.end()) {
+              break;
+            }
+				  	std::string &accept_encoding = enc_it->first;
+            if (accept_encoding != "gzip") {
+              break;
+            }
+
+				  	response->add_header("Content-Encoding", "gzip");
+				  }
+        } while (0);
+
         response->add_header("Content-Type", "text/plain");
         response->add_header("Content-Length", std::to_string(arg.length()));
         response->add_body(arg);
@@ -593,12 +687,14 @@ class http_client {
         }
 
       } else if (path == "/user-agent") {
-#if __cplusplus >= 201703L
-        auto it = std::find_if(headers.begin(),
-                               headers.end(),
-        [](std::string& h) {
-          return h.find("User-Agent") != std::string::npos;
-        });
+#if __cplusplus >= 201703L && 1
+        auto it = std::find_if(
+            headers.begin(),
+            headers.end(),
+            [](std::string& h) {
+              return h.find("User-Agent") != std::string::npos;
+            }
+          );
 #else
         auto it = headers.begin();
         while (it != headers.end()) {
@@ -791,7 +887,7 @@ int main(int argc, char **argv) {
 
   setup_sigint_handler();
 
-  http_server server("", 4221, get_directory(argc, argv));
+  http_server server("127.0.0.1", 4221, get_directory(argc, argv));
 
   std::cout << "Waiting for a client to connect...\n";
 
