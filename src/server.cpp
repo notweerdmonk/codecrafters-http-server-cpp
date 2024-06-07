@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <getopt.h>
+#include <gzip.h>
 
 static
 std::atomic<bool> exit_condition{false};
@@ -616,6 +617,9 @@ class http_client {
             }
 
 				  	response->add_header("Content-Encoding", "gzip");
+
+            /* gzip payload */
+            compress_string(arg.c_str(), arg.length(), arg);
 				  }
         } while (0);
 
