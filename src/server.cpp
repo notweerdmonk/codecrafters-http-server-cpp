@@ -549,48 +549,48 @@ class http_client {
 
         do {
           if (it != headers.end()) {
-          	t.reset();
-          	t.tokenize(*it, ':');
-          	if (t.count() != 2) {
-          	  break;
-          	}
-          	std::string &enc_tok = t.get_token(1);
+            t.reset();
+            t.tokenize(*it, ':');
+            if (t.count() != 2) {
+              break;
+            }
+            std::string &enc_tok = t.get_token(1);
 
-				  	std::vector<std::pair<std::string, std::string>> encodings;
+            std::vector<std::pair<std::string, std::string>> encodings;
 
             /* werkzeug v2.2.2, file: werkzeug/http.py */
-			    	std::regex accept_re(
-			    	    R"(()"
-			    	      R"([^\s;,]+)"
-			    	      R"((?:[ \t]*;[ \t]*)"
-			    	        R"((?:)"
-			    	          R"([^\s;,q][^\s;,]*)"
-			    	        R"(|)"
-			    	          R"(q[^\s;,=][^\s;,]*)"
-			    	        R"())"
-			    	      R"()*)"
-			    	    R"())"
-			    	    R"((?:[ \t]*;[ \t]*q=)"
-			    	      R"((\d*(?:\.\d+)?))"
-			    	      R"([^,]*)"
-			    	    R"()?)"
-			    	  );
-				  	std::smatch match;
-				  	std::string::const_iterator start(enc_tok.cbegin());
-				  	while (std::regex_search(start, enc_tok.cend(), match, accept_re)) {
-				  		std::string encoding = match[1].matched ? match[1].str()
-				  				: match[4].str();
-				  		std::string qvalue = match[2].matched ? match[2].str() : "1.0";
+            std::regex accept_re(
+                R"(()"
+                  R"([^\s;,]+)"
+                  R"((?:[ \t]*;[ \t]*)"
+                    R"((?:)"
+                      R"([^\s;,q][^\s;,]*)"
+                    R"(|)"
+                      R"(q[^\s;,=][^\s;,]*)"
+                    R"())"
+                  R"()*)"
+                R"())"
+                R"((?:[ \t]*;[ \t]*q=)"
+                  R"((\d*(?:\.\d+)?))"
+                  R"([^,]*)"
+                R"()?)"
+              );
+            std::smatch match;
+            std::string::const_iterator start(enc_tok.cbegin());
+            while (std::regex_search(start, enc_tok.cend(), match, accept_re)) {
+              std::string encoding = match[1].matched ? match[1].str()
+                : match[4].str();
+              std::string qvalue = match[2].matched ? match[2].str() : "1.0";
 
-				  		encodings.push_back({encoding, qvalue});
+              encodings.push_back({encoding, qvalue});
 
-				  	  start = match.suffix().first;
-				  	}
-				  	if (encodings.empty()) {
-				  		break;
-          	}
+              start = match.suffix().first;
+            }
+            if (encodings.empty()) {
+              break;
+            }
 
-				  	/* Choose gzip if available */
+            /* Choose gzip if available */
 #if __cplusplus >= 201703L && 1
             auto enc_it = std::find_if(
               encodings.begin(),
@@ -611,16 +611,16 @@ class http_client {
             if (enc_it == encodings.end()) {
               break;
             }
-				  	std::string &accept_encoding = enc_it->first;
+            std::string &accept_encoding = enc_it->first;
             if (accept_encoding != "gzip") {
               break;
             }
 
-				  	response->add_header("Content-Encoding", "gzip");
+            response->add_header("Content-Encoding", "gzip");
 
             /* gzip payload */
             compress_string(arg.c_str(), arg.length(), arg);
-				  }
+          }
         } while (0);
 
         response->add_header("Content-Type", "text/plain");
@@ -911,7 +911,7 @@ int main(int argc, char **argv) {
   }
 
   tpool.exit();
-  
+
   std::cout << "Exiting\n";
 
   return EXIT_SUCCESS;
