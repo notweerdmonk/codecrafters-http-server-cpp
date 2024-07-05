@@ -11,8 +11,9 @@
 #include <mutex>
 #include <condition_variable>
 #include <regex>
-#include <utility>
+#include <utility> /* for std::pair */
 #include <unistd.h>
+#include <sys/sendfile.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -348,7 +349,8 @@ class http_message {
   std::string version{"1.1"};
   std::string header;
   std::string body;
-  std::string message;
+  bool isfile;
+  std::string filepath;
 
   struct http_response_status {
     std::string code;
@@ -363,34 +365,33 @@ class http_message {
               + http_response_statuses[status].status + std::string{"\r\n"};
   }
 
+  std::string message() {
+    return header + std::string("\r\n") + body;
+  }
  public:
 
   http_message(int status = 200, const std::string& _version = "1.1")
-    : version{const_cast<std::string&>(_version)}, header{""}, body{""} {
+    : version{const_cast<std::string&>(_version)}, header{""}, body{""},
+      filepath{""}, isfile(false) {
     set_statusline(status);
-    message = header + std::string{"\r\n"} + body;
   }
 
   http_message(std::string& body_, int status = 200,
                const std::string& _version = "1.1")
-               : version{_version}, header{""}, body{body_} {
+               : version{_version}, header{""}, body{body_},
+                 filepath{""}, isfile(false) {
     set_statusline(status);
-    message = header + std::string{"\r\n"} + body;
   }
 
   void add_header(std::string& key, std::string& value) {
     if (key.length() > 0) {
       header += key + std::string{": "} + value + std::string{"\r\n"};
-
-      message = header + std::string{"\r\n"} + body;
     }
   }
 
   void add_header(std::string&& key, std::string&& value) {
     if (key.length() > 0) {
       header += key + std::string{": "} + value + std::string{"\r\n"};
-
-      message = header + std::string{"\r\n"} + body;
     }
   }
 
@@ -401,8 +402,6 @@ class http_message {
         header += v + std::string{","};
       }
       header += std::string{"\r\n"};
-
-      message = header + std::string{"\r\n"} + body;
     }
   }
 
@@ -414,23 +413,37 @@ class http_message {
         header += v + std::string{";"};
       }
       header += std::string{"\r\n"};
-
-      message = header + std::string{"\r\n"} + body;
     }
   }
 
   void add_body(std::string& _body) {
     body = _body;
-    message = header + std::string{"\r\n"} + body;
   }
 
   void add_body(std::string&& _body) {
     body = _body;
-    message = header + std::string{"\r\n"} + body;
   }
 
-  std::string& content() {
-    return message;
+  std::string content() {
+    return message();
+  }
+
+  void setfile(const std::string &filepath) {
+    isfile = true;
+    this->filepath = filepath;
+  }
+
+  void setfile(std::string &&filepath) {
+    isfile = true;
+    this->filepath = std::move(filepath);
+  }
+
+  std::string& getfile() {
+    return filepath;
+  }
+
+  bool is_file() const {
+    return isfile;
   }
 };
 
@@ -645,29 +658,13 @@ class http_client {
             break;
           }
 
-          char data[stbuf.st_size] = { 0, };
-          int fd = open(filepath.c_str(), O_RDONLY);
-          if (fd < 0) {
-            response = new http_message(500);
-            break;
-          }
-
-          ssize_t nread = read(fd, data, stbuf.st_size);
-          close(fd);
-          if (nread != stbuf.st_size) {
-            response = new http_message(500);
-            break;
-          }
-
           response = new http_message;
           response->add_header("Content-Type", "application/octet-stream");
           std::string arg = std::string{"filename=\""} + filename
-                            + std::string{"\""};
+            + std::string{"\""};
           response->add_header("Content-Disposition",  { "attachment", arg });
-          response->add_header("Content-Length", std::to_string(nread));
-          response->add_body(
-            std::string{data, static_cast<std::string::size_type>(nread)}
-          );
+          response->add_header("Content-Length", std::to_string(stbuf.st_size));
+          response->setfile(filepath);
           break;
 
         } else if (method == "POST") {
@@ -737,13 +734,55 @@ class http_client {
       return;
     }
     std::string respstr{response->content()};
-    delete response;
 
     // Send HTTP response
-    nbytes = send(client_fd, respstr.c_str(), respstr.length(), 0);
-    if (nbytes < 0) {
-      std::cerr << "Failed to send to client\n";
+    std::size_t rem = respstr.length();
+    std::size_t offset = 0;
+    while (rem > 0) {
+      nbytes = send(client_fd, respstr.c_str() + offset, rem, 0);
+      if (nbytes < 0) {
+        std::cerr << "Failed to send to client: " << strerror(errno) << '\n';
+      }
+      offset += nbytes;
+      rem -= nbytes;
     }
+
+    if (response->is_file()) {
+      do {
+        std::string &filepath = response->getfile();
+
+        struct stat stbuf;
+        if ( (stat(filepath.c_str(), &stbuf) != 0) && (errno == ENOENT) ) {
+          break;
+        }
+
+        int fd = open(filepath.c_str(), O_RDONLY);
+        if (fd < 0) {
+          std::cerr << "Failed to open file(" << filepath << "): "
+            << strerror(errno) << '\n';
+          break;
+        }
+
+        std::size_t rem = stbuf.st_size;
+        off_t offset = 0;
+        while (rem > 0) {
+          ssize_t nbytes = sendfile(client_fd, fd, &offset,
+              rem);
+          if (nbytes < 0) {
+            std::cerr << "Failed to send file to client: " << strerror(errno)
+              << '\n';
+            break;
+          }
+          offset += nbytes;
+          rem -= nbytes;
+        }
+
+        close(fd);
+
+      } while (0);
+    }
+
+    delete response;
 
     close(client_fd);
   }
@@ -899,7 +938,7 @@ int main(int argc, char **argv) {
 
   while (!exit_condition) {
     if (tpool.size() < 10) {
-      http_client *c = server.accept();;
+       auto c = server.accept();;
       if (!c) {
         continue;
       }
