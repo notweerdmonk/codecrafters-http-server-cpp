@@ -3,10 +3,12 @@
 #include <chrono>
 #include <mutex>
 #include <memory>
+#include <vector>
 #include <string>
 #include <cstring>
 #include <fcntl.h>
 #include <curl/curl.h>
+#include <sys/wait.h>
 
 #define ANSI_COLOR_RED     "\x1b[31m"
 #define ANSI_COLOR_GREEN   "\x1b[32m"
@@ -21,13 +23,82 @@
 
 std::mutex mtx;
 
+bool do_exec(const std::string& command, std::string& output) {
+  int stdout_pipe[2], stderr_pipe[2];
+  if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0) {
+    perror("pipe");
+    return false;
+  }
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    perror("fork");
+    return false;
+  }
+
+  if (pid == 0) {
+    // Redirect stdout and stderr to pipes
+    dup2(stdout_pipe[1], STDOUT_FILENO);
+    dup2(stderr_pipe[1], STDERR_FILENO);
+
+    // Close unused ends of the pipes
+    close(stdout_pipe[0]);
+    close(stdout_pipe[1]);
+    close(stderr_pipe[0]);
+    close(stderr_pipe[1]);
+
+    std::vector<char*> args;
+    char* token = strtok(const_cast<char*>(command.c_str()), " ");
+    while (token != nullptr) {
+      args.push_back(token);
+      token = strtok(nullptr, " ");
+    }
+    args.push_back(nullptr);
+
+    execvp(args[0], args.data());
+    // execvp only returns if an error occurs
+    perror("execvp");
+    _exit(EXIT_FAILURE);
+  } else {
+    // Close write ends of the pipes
+    close(stdout_pipe[1]);
+    close(stderr_pipe[1]);
+
+    char buffer[4096];
+    ssize_t count;
+
+    while ((count = read(stdout_pipe[0], buffer, sizeof(buffer))) > 0) {
+      output.append(buffer, count);
+    }
+    std::cout << __func__ << ": output: " << output << '\n';
+
+    while ((count = read(stderr_pipe[0], buffer, sizeof(buffer))) > 0) {
+      output.append(buffer, count);
+    }
+    std::cout << __func__ << ": output: " << output << '\n';
+
+    // Close read ends of the pipes
+    close(stdout_pipe[0]);
+    close(stderr_pipe[0]);
+
+    // Wait for the child process to complete
+    int status;
+    waitpid(pid, &status, 0);
+
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+  }
+
+  return false;
+}
+
 int diff(std::string& f1, std::string& f2) {
-  std::string command = "diff " + f1 + " " + f2;
+  std::string command = "diff " + f1 + " " + f2 + " 2>&1";
   char result[8];
 
   std::shared_ptr<FILE> diff_proc(popen(command.c_str(), "r"), pclose);
   if (!diff_proc) {
-    std::cerr << "Error executing diff command: " << strerror(errno) << '\n';
+    std::cerr << "Error executing command(" << command << "): "
+      << strerror(errno) << '\n';
     return EXIT_FAILURE;
   }
 
@@ -36,6 +107,14 @@ int diff(std::string& f1, std::string& f2) {
   } else {
     return 1;
   }
+  
+  //std::string output;
+  //do_exec(command, output);
+  //if (output.empty()) {
+  //  return 0;
+  //} else {
+  //  return 1;
+  //}
 }
 
 size_t write_callback(void* contents, size_t size, size_t nmemb,
@@ -71,94 +150,114 @@ int main(int argc, char** argv) {
 
   for (int i = 0; i < NUM_THREADS; i++) {
     threads[i] = new std::thread(
-    [&uploadfile, &nrequest, buf, nread]() {
+      [&uploadfile, &nrequest, buf, nread]() {
 
-      int num_requests_per_thread = NUM_REQUESTS / NUM_THREADS;
-      for (int j = 0; j < num_requests_per_thread; j++) {
-        std::unique_lock<std::mutex> lock(mtx);
-        int nreqlocal = ++nrequest;
-        lock.unlock();
+        int num_requests_per_thread = NUM_REQUESTS / NUM_THREADS;
+        for (int j = 0; j < num_requests_per_thread; j++) {
+          pid_t tid = gettid();
+          std::string newfilename{"newfile" + std::to_string(tid)};
 
-        int diff_res;
-        CURL* curl = curl_easy_init();
+          std::unique_lock<std::mutex> lock(mtx);
+          int nreqlocal = ++nrequest;
+          lock.unlock();
 
-        std::string url{};
+          CURL* curl = curl_easy_init();
 
-        switch (nreqlocal % 5) {
-          case 0:
-            url = "http://localhost:4221";
-            break;
+          std::string url{};
 
-          case 1:
-            url = "http://localhost:4221/echo/mangoes/in/summer";
-            break;
+          switch (nreqlocal % 5) {
+            case 0:
+              url = "http://localhost:4221";
+              break;
 
-          case 2:
-            url = "http://localhost:4221/user-agent";
-            break;
+            case 1:
+              url = "http://localhost:4221/echo/mangoes/in/summer";
+              break;
 
-          case 3:
-            url = "http://localhost:4221/files/testfile";
-            break;
+            case 2:
+              url = "http://localhost:4221/user-agent";
+              break;
 
-          case 4:
-            url = "http://localhost:4221/files/newfile";
-        }
+            case 3:
+              url = "http://localhost:4221/files/testfile";
+              break;
 
-        struct curl_slist *headers = nullptr;
-        std::string response;
-
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "laggybrowser/0.01");
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-
-        if (nreqlocal % 5 == 4) {
-          curl_slist_append(headers,
-                            "Content-Type: application/octet-stream");
-          curl_easy_setopt(curl, CURLOPT_POSTFIELDS, buf);
-          curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, nread);
-        }
-
-        CURLcode res = curl_easy_perform(curl);
-
-        if (nreqlocal % 5 == 4) {
-          curl_slist_free_all(headers);
-          headers = nullptr;
-
-          if (res == CURLE_OK) {
-            std::string newfile =
-              std::string{uploadfile, 0, uploadfile.rfind("/") + 1}
-              + "newfile";
-            diff_res = diff(uploadfile, newfile);
+            case 4:
+              url += "http://localhost:4221/files/" + newfilename;
           }
-        }
 
-        if (res != CURLE_OK) {
-          std::cerr << "curl_easy_perform() failed: " <<
-                    curl_easy_strerror(res) << std::endl;
-        } else {
-          long http_response_code;
-          curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_response_code);
+          struct curl_slist *headers = nullptr;
+          std::string response;
 
-          std::lock_guard<std::mutex> lock(mtx);
-          std::cout << "Request # " << nreqlocal << " URL: " << url;
+          curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+          curl_easy_setopt(curl, CURLOPT_VERBOSE, 0L);
+          curl_easy_setopt(curl, CURLOPT_USERAGENT, "laggybrowser/0.01");
+          curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+          curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+
           if (nreqlocal % 5 == 4) {
-            if (diff_res) {
-              std::cout << ANSI_COLOR_RED " Files don't match" ANSI_COLOR_RESET;
-            } else {
-              std::cout << ANSI_COLOR_GREEN " Files match" ANSI_COLOR_RESET;
+            curl_slist_append(headers,
+                              "Content-Type: application/octet-stream");
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, buf);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, nread);
+          }
+
+          CURLcode res = curl_easy_perform(curl);
+
+          if (nreqlocal % 5 == 4) {
+            curl_slist_free_all(headers);
+            headers = nullptr;
+
+            if (res == CURLE_OK) {
             }
           }
-          std::cout << " Response code: " << http_response_code << " Response: " << response << std::endl;
+
+          if (res != CURLE_OK) {
+            std::cerr << "curl_easy_perform() failed: " <<
+                      curl_easy_strerror(res) << std::endl;
+          } else {
+            long http_response_code;
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_response_code);
+
+            std::lock_guard<std::mutex> lock(mtx);
+
+            std::cout << "Request # " << nreqlocal << " URL: " << url;
+
+            if (nreqlocal % 5 == 4) {
+              std::string newfile =
+                std::string{uploadfile, 0, uploadfile.rfind("/") + 1}
+                + newfilename;
+
+              if (diff(uploadfile, newfile)) {
+                std::cout << ANSI_COLOR_RED " Files don't match" ANSI_COLOR_RESET;
+              } else {
+                std::cout << ANSI_COLOR_GREEN " Files match" ANSI_COLOR_RESET;
+              }
+
+              if (!newfile.empty()) {
+                if (unlink(newfile.c_str())) {
+                  std::cerr << "\nError removing file(" << newfile << "): "
+                    << strerror(errno) << '\n';
+                }
+              }
+
+            }
+
+            std::cout << " Response code: " << http_response_code;
+
+            if (nreqlocal % 5 == 3 || nreqlocal % 5 == 4) {
+              std::cout  << " Response length: " << response.length()
+                << std::endl;
+
+            } else {
+              std::cout << " Response: " << response << std::endl;
+            }
+          }
+
+          curl_easy_cleanup(curl);
         }
 
-        curl_easy_cleanup(curl);
-      }
-
-    }
-    );
+    });
   }
 
   for (int i = 0; i < NUM_THREADS; i++) {
